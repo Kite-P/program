@@ -1,0 +1,31 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+  <meta charset="utf-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1" />
+  <title>Flying Bird</title>
+  <link rel="stylesheet" href="style.css" />
+</head>
+<body>
+  <main class="page">
+    <section class="game-card">
+      <button id="resetProgressBtn" class="reset-progress" type="button">重置进度</button>
+      <canvas id="game" width="480" height="720" aria-label="Flying Bird game canvas"></canvas>
+      <div class="help">
+        空格 / 鼠标点击 / 触屏：跳跃　R：重新开始　P：暂停
+      </div>
+    </section>
+  </main>
+  <dialog id="resetDialog">
+    <form method="dialog" class="dialog-card">
+      <h2>确认重置？</h2>
+      <p>确认后将清空 Flying Bird 的最高分记录，并回到初始状态。</p>
+      <div class="dialog-actions">
+        <button id="resetCancel" value="cancel">取消</button>
+        <button id="resetConfirm" value="default">确认重置</button>
+      </div>
+    </form>
+  </dialog>
+  <script src="game.js"></script>
+</body>
+</html>
