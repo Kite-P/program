@@ -1,0 +1,112 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+  <meta charset="utf-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1" />
+  <title>Arrow Exit Puzzle</title>
+  <link rel="stylesheet" href="style.css" />
+</head>
+<body class="menu-screen">
+  <div class="app">
+    <button id="resetProgressBtn" class="reset-progress" type="button">重置进度</button>
+    <header class="topbar">
+      <div class="hero-copy">
+        <div class="logo-badge" aria-hidden="true">↪</div>
+        <h1>Arrow Exit Puzzle</h1>
+        <p>点击箭头，让它沿头部方向和自身路径钻出棋盘。</p>
+      </div>
+      <button id="adminBtn" class="ghost">Admin</button>
+    </header>
+
+    <section id="menu" class="panel menu-panel">
+      <button id="levelModeBtn" class="main-btn"><span class="btn-icon">▦</span><span>关卡模式</span><small>100 个内置关卡</small></button>
+      <button id="randomBtn" class="main-btn"><span class="btn-icon">⤨</span><span>随机生成</span><small>生成新的 Seed</small></button>
+      <button id="seedBtn" class="main-btn"><span class="btn-icon">#</span><span>使用 Seed</span><small>粘贴并复现关卡</small></button>
+      <button id="helpBtn" class="main-btn secondary"><span class="btn-icon">?</span><span>玩法说明</span><small>规则与技能说明</small></button>
+    </section>
+    <div id="menuMessage" class="menu-message" aria-live="polite"></div>
+
+    <section id="gamePanel" class="game-panel hidden">
+      <div class="hud">
+        <div id="modeText">Level</div>
+        <div id="timerText" class="timer">00:00</div>
+        <div id="heartText">♥ ♥ ♥</div>
+      </div>
+      <canvas id="game" width="640" height="640" aria-label="Arrow Exit Puzzle canvas"></canvas>
+      <div id="statusActions" class="status-actions hidden">
+        <button id="nextLevelBtn" type="button">下一关</button>
+        <button id="randomRetryBtn" type="button">再来一次</button>
+        <button id="randomNewBtn" type="button">来个新的</button>
+      </div>
+      <div class="toolbar">
+        <button id="backBtn">返回</button>
+        <button id="restartBtn">重开</button>
+        <button id="gridBtn">网格：开</button>
+        <button id="hintBtn">提示：2</button>
+        <button id="eraseBtn">擦除：2</button>
+      </div>
+      <label class="seed-box">Seed
+        <input id="seedOutput" readonly value="" />
+      </label>
+      <div id="message" class="message"></div>
+    </section>
+  </div>
+
+  <dialog id="levelDialog">
+    <form method="dialog" class="dialog-card wide">
+      <h2>选择关卡</h2>
+      <div id="levelsGrid" class="levels-grid"></div>
+      <button>关闭</button>
+    </form>
+  </dialog>
+
+  <dialog id="seedDialog">
+    <form method="dialog" class="dialog-card" id="seedForm">
+      <h2>输入 Seed</h2>
+      <textarea id="seedInput" placeholder="把别人给你的 seed 粘贴到这里"></textarea>
+      <div class="dialog-actions">
+        <button value="cancel">取消</button>
+        <button id="playSeedConfirm" value="default">开始</button>
+      </div>
+      <p id="seedError" class="error"></p>
+    </form>
+  </dialog>
+
+  <dialog id="resetDialog">
+    <form method="dialog" class="dialog-card">
+      <h2>确认重置？</h2>
+      <p>确认后将清空内置关卡模式的闯关记录，恢复为只解锁第 1 关。</p>
+      <div class="dialog-actions">
+        <button id="resetCancel" value="cancel">取消</button>
+        <button id="resetConfirm" value="default">确认重置</button>
+      </div>
+    </form>
+  </dialog>
+
+  <dialog id="adminDialog">
+    <form method="dialog" class="dialog-card" id="adminForm">
+      <h2>Admin Code</h2>
+      <input id="adminInput" autocomplete="off" placeholder="输入 admin" />
+      <div class="dialog-actions">
+        <button value="cancel">取消</button>
+        <button id="adminConfirm" value="default">确认</button>
+      </div>
+      <p id="adminError" class="error"></p>
+    </form>
+  </dialog>
+
+  <dialog id="helpDialog">
+    <form method="dialog" class="dialog-card help-card">
+      <h2>玩法说明</h2>
+      <p>每条黑色折线都是一个箭头。箭头头部面朝方向如果一路到棋盘外都没有别的箭头阻挡，就可以被移除。</p>
+      <p>箭头自己的身体不会挡住自己，但会挡住其他箭头。点错会扣心，心用完或时间归零则失败。</p>
+      <p>第 1 关开始可开关网格；第 2 关获得提示；第 3 关获得擦除。每关提示和擦除默认各 2 次。</p>
+      <p>随机关卡和 Seed 关卡会在底部显示可复制的 Seed。</p>
+      <button>知道了</button>
+    </form>
+  </dialog>
+
+  <script src="levels.js"></script>
+  <script src="game.js"></script>
+</body>
+</html>
