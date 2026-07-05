@@ -1,0 +1,148 @@
+(() => {
+  const canvas = document.getElementById('game');
+  const ctx = canvas.getContext('2d');
+  const colorSel = document.getElementById('colorCount');
+  const modeToggle = document.getElementById('modeToggle');
+  const modeText = document.getElementById('modeText');
+  const W = canvas.width, H = canvas.height;
+  const R = 20, dx = R * 2, dy = Math.sqrt(3) * R;
+  const gridLeft = 160, gridTop = 76, rows = 14, cols = 16;
+  const shooter = { x: W / 2, y: H - 58 };
+  const bottomLine = H - 126;
+  const palette = ['#ff5b70','#ffc947','#49d17d','#4ecbff','#a476ff','#ff8c36'];
+  let grid, initialGrid, current, next, flying, aim = -Math.PI / 2, moves, score, state, message;
+  let particles = [], fallingBubbles = [], rowShift = 0, rowShiftAnim = 0, endless = false, pendingEndless = false, shotCount = 0, last = performance.now();
+
+  function colorCount(){ return Math.max(2, Math.min(6, parseInt(colorSel.value, 10) || 4)); }
+  function cloneGrid(g){ return g.map(row => row.map(cell => cell ? { color: cell.color } : null)); }
+  function setCell(r,c,color){ if(r>=0&&r<rows&&c>=0&&c<cols) grid[r][c] = { color }; }
+  function cellPos(r,c){ return { x:gridLeft + c*dx + (r%2)*R, y:gridTop + r*dy }; }
+  function neighbors(r,c){
+    const even = r % 2 === 0;
+    return [[0,-1],[0,1],[-1,0],[1,0],[-1,even?-1:1],[1,even?-1:1]].map(([dr,dc])=>[r+dr,c+dc]).filter(([rr,cc])=>rr>=0&&rr<rows&&cc>=0&&cc<cols);
+  }
+  function randomBoard(){
+    endless = pendingEndless;
+    const cc = colorCount();
+    grid = Array.from({length:rows},()=>Array(cols).fill(null));
+    const fillRows = endless ? 7 : 8;
+    const holes = endless ? 0.10 : 0.16;
+    for(let r=0;r<fillRows;r++) for(let c=0;c<cols;c++) if(Math.random()>holes) setCell(r,c,Math.floor(Math.random()*cc));
+    for(let i=0;i<24;i++){
+      const r=Math.floor(Math.random()*Math.min(fillRows,8)), c=Math.floor(Math.random()*cols), col=Math.floor(Math.random()*cc);
+      setCell(r,c,col); if(c+1<cols) setCell(r,c+1,col); if(r+1<rows) setCell(r+1,c,col);
+    }
+    initialGrid = cloneGrid(grid);
+    score = 0; moves = endless ? Infinity : 36; shotCount = 0; state='play'; message = endless ? '无尽模式：每 6 发泡泡下移 1 行' : '随机大关卡：清除全部泡泡即可通关';
+    modeToggle.classList.toggle('on', pendingEndless); modeText.textContent = pendingEndless ? '无尽模式' : '随机关卡';
+    current = randomColorFromBoard(); next = randomColorFromBoard(); flying = null; particles = []; fallingBubbles=[]; rowShift=0; rowShiftAnim=0;
+  }
+  function restartSame(){ grid = cloneGrid(initialGrid); score = 0; moves = endless ? Infinity : 36; shotCount = 0; state='play'; message = endless ? '无尽模式重新开始' : '随机关卡重新开始'; current=randomColorFromBoard(); next=randomColorFromBoard(); flying=null; particles=[]; fallingBubbles=[]; rowShift=0; rowShiftAnim=0; }
+  function colorsOnBoard(){ const s = new Set(); for(const row of grid) for(const cell of row) if(cell) s.add(cell.color); return [...s]; }
+  function randomColorFromBoard(){ const arr = colorsOnBoard(); if(arr.length) return arr[Math.floor(Math.random()*arr.length)]; return Math.floor(Math.random()*colorCount()); }
+  function posToCell(x,y){ let best={r:0,c:0,d:Infinity}; for(let r=0;r<rows;r++)for(let c=0;c<cols;c++){const p=cellPos(r,c),d=Math.hypot(x-p.x,y-p.y);if(d<best.d)best={r,c,d};} return best; }
+  function findEmptyNear(r,c){ for(let rad=1;rad<7;rad++) for(let rr=Math.max(0,r-rad);rr<=Math.min(rows-1,r+rad);rr++) for(let cc=Math.max(0,c-rad);cc<=Math.min(cols-1,c+rad);cc++) if(!grid[rr][cc]) return {r:rr,c:cc}; return null; }
+
+  function update(dt){
+    particles = particles.filter(p=>(p.life-=dt)>0).map(p=>{p.x+=p.vx*dt;p.y+=p.vy*dt;p.vy+=260*dt;return p;});
+    if(rowShiftAnim>0){ rowShiftAnim=Math.max(0,rowShiftAnim-dt); rowShift = dy * (rowShiftAnim/0.28); } else rowShift=0;
+    fallingBubbles = fallingBubbles.filter(f=>(f.life-=dt)>0).map(f=>{f.y += f.vy*dt; f.vy += 360*dt; f.alpha=Math.max(0,f.life/.65); return f;});
+    if(!flying) return;
+    flying.x += flying.vx * dt; flying.y += flying.vy * dt;
+    const leftWall = gridLeft - R, rightWall = gridLeft + (cols-1)*dx + R*2;
+    if(flying.x < leftWall){ flying.x = leftWall; flying.vx *= -1; }
+    if(flying.x > rightWall){ flying.x = rightWall; flying.vx *= -1; }
+    // The shooter starts below the danger line; only lose when a fired bubble returns downward into the bottom line.
+    if(flying.vy > 0 && flying.y + R >= bottomLine){ state='lose'; message='泡泡碰到底线，挑战失败'; flying=null; return; }
+    if(flying.y <= gridTop){ attachFlying(); return; }
+    outer: for(let r=0;r<rows;r++) for(let c=0;c<cols;c++) if(grid[r][c]){ const p=cellPos(r,c); if(Math.hypot(flying.x-p.x,flying.y-p.y) < R*1.88){ attachFlying(); break outer; } }
+  }
+  function attachFlying(){
+    if(!flying) return;
+    let cell = posToCell(flying.x, flying.y);
+    if(grid[cell.r][cell.c]){
+      let best=null; for(const [nr,nc] of neighbors(cell.r,cell.c)) if(!grid[nr][nc]){const p=cellPos(nr,nc),d=Math.hypot(flying.x-p.x,flying.y-p.y); if(!best||d<best.d) best={r:nr,c:nc,d};}
+      cell = best || findEmptyNear(cell.r,cell.c) || cell;
+    }
+    if(!grid[cell.r][cell.c]) grid[cell.r][cell.c] = { color:flying.color };
+    burst(cellPos(cell.r,cell.c).x, cellPos(cell.r,cell.c).y, palette[flying.color]);
+    const removed = removeMatches(cell.r, cell.c);
+    if(removed===0){ if(!endless) moves--; message = '没有形成 3 连，继续尝试'; }
+    else { score += removed*10; message = `消除了 ${removed} 个泡泡！`; }
+    // First resolve all normal matches and detached groups.
+    removeFloaters();
+    flying=null; shotCount++;
+    // In endless mode, row shifting happens only after the whole shot result is settled.
+    // Then run detached-group cleanup again so the downshift never cancels a falling/removal result.
+    if(endless && shotCount % 6 === 0 && state==='play') {
+      addRows(1);
+      // 下移不会重新触发悬空消除，避免旧位置和新位置误判；只在下移完成后进行底线检测。
+    }
+    current = next; next = randomColorFromBoard(); checkEnd();
+  }
+  function removeMatches(sr,sc){
+    const start=grid[sr][sc]; if(!start) return 0; const color=start.color, seen=new Set(), stack=[[sr,sc]], group=[];
+    while(stack.length){const [r,c]=stack.pop(), key=r+','+c; if(seen.has(key))continue; seen.add(key); if(!grid[r][c]||grid[r][c].color!==color)continue; group.push([r,c]); for(const n of neighbors(r,c)) stack.push(n);}
+    if(group.length>=3){ for(const [r,c] of group){const p=cellPos(r,c);burst(p.x,p.y,palette[color]);grid[r][c]=null;} return group.length; }
+    return 0;
+  }
+  function removeFloaters(){
+    const connected=new Set(), stack=[]; for(let c=0;c<cols;c++) if(grid[0][c]) stack.push([0,c]);
+    while(stack.length){const [r,c]=stack.pop(),key=r+','+c;if(connected.has(key))continue;connected.add(key);for(const [nr,nc] of neighbors(r,c)) if(grid[nr][nc]) stack.push([nr,nc]);}
+    let count=0; for(let r=0;r<rows;r++)for(let c=0;c<cols;c++) if(grid[r][c]&&!connected.has(r+','+c)){
+      const p=cellPos(r,c), col=grid[r][c].color;
+      fallingBubbles.push({x:p.x,y:p.y,color:col,r:R,vy:120+Math.random()*60,life:.65,alpha:1});
+      burst(p.x,p.y,palette[col]); grid[r][c]=null; count++;
+    }
+    if(count){ score+=count*15; message += ` 悬空掉落 ${count} 个。`; }
+  }
+  function addRows(n){
+    const cc=colorCount();
+    for(let i=0;i<n;i++){
+      grid.pop();
+      const row = Array.from({length:cols},()=>Math.random()<.92?{color:Math.floor(Math.random()*cc)}:null);
+      grid.unshift(row);
+    }
+    rowShift = dy; rowShiftAnim = 0.28;
+    message = '无尽模式：顶部新增 1 行泡泡，整体下移';
+  }
+  function checkEnd(){
+    let left=0, low=false; for(let r=0;r<rows;r++)for(let c=0;c<cols;c++)if(grid[r][c]){left++;if(cellPos(r,c).y+R>=bottomLine)low=true;}
+    if(!endless && left===0){state='win';message='随机关卡完成！';}
+    else if(low){state='lose';message='泡泡碰到底线，挑战失败';}
+    else if(!endless && moves<=0){state='lose';message='步数用完，挑战失败';}
+  }
+  function shoot(){ if(state==='win'||state==='lose'){ restartSame(); return; } if(flying||state!=='play') return; const speed=700; flying={x:shooter.x,y:shooter.y,color:current,vx:Math.cos(aim)*speed,vy:Math.sin(aim)*speed}; }
+
+  function draw(){ drawBg(); drawGrid(); drawAim(); drawShooter(); if(flying) drawBubble(flying.x,flying.y,flying.color,R); drawParticles(); drawUI(); if(state==='win'||state==='lose') drawPanel(); }
+  function drawBg(){ const g=ctx.createLinearGradient(0,0,0,H);g.addColorStop(0,'#202b74');g.addColorStop(1,'#151a42');ctx.fillStyle=g;ctx.fillRect(0,0,W,H); for(let i=0;i<70;i++){ctx.fillStyle=`rgba(255,255,255,${.05+(i%5)*.025})`;ctx.beginPath();ctx.arc((i*83)%W,(i*47)%H,1+(i%4),0,Math.PI*2);ctx.fill();} }
+  function drawGrid(){
+    for(let r=0;r<rows;r++)for(let c=0;c<cols;c++)if(grid[r][c]){const p=cellPos(r,c);drawBubble(p.x,p.y-rowShift,grid[r][c].color,R);}
+    for(const f of fallingBubbles){ctx.globalAlpha=f.alpha;drawBubble(f.x,f.y,f.color,f.r);ctx.globalAlpha=1;}
+    ctx.strokeStyle='rgba(255,255,255,.35)';ctx.lineWidth=3;ctx.beginPath();ctx.moveTo(105,bottomLine);ctx.lineTo(W-105,bottomLine);ctx.stroke();
+  }
+  function drawBubble(x,y,color,r){ const grad=ctx.createRadialGradient(x-r*.35,y-r*.35,3,x,y,r);grad.addColorStop(0,'#fff');grad.addColorStop(.18,palette[color]);grad.addColorStop(1,shade(palette[color],-35));ctx.fillStyle=grad;ctx.beginPath();ctx.arc(x,y,r,0,Math.PI*2);ctx.fill();ctx.strokeStyle='rgba(0,0,0,.25)';ctx.lineWidth=2;ctx.stroke();ctx.fillStyle='rgba(255,255,255,.38)';ctx.beginPath();ctx.arc(x-r*.35,y-r*.38,r*.22,0,Math.PI*2);ctx.fill(); }
+  function drawAim(){
+    if(flying||state!=='play') return; ctx.save(); ctx.setLineDash([10,10]); ctx.strokeStyle='rgba(255,255,255,.72)'; ctx.lineWidth=3; ctx.beginPath(); ctx.moveTo(shooter.x,shooter.y);
+    let x=shooter.x,y=shooter.y,vx=Math.cos(aim),vy=Math.sin(aim); const left=gridLeft-R,right=gridLeft+(cols-1)*dx+R*2;
+    for(let seg=0;seg<5;seg++){
+      const candidates=[]; if(vy<0)candidates.push({t:(gridTop-y)/vy,type:'top'}); if(vx<0)candidates.push({t:(left-x)/vx,type:'side'}); if(vx>0)candidates.push({t:(right-x)/vx,type:'side'});
+      const hit=candidates.filter(o=>o.t>0.1).sort((a,b)=>a.t-b.t)[0]; if(!hit)break;
+      const maxT=Math.min(hit.t,500); x+=vx*maxT; y+=vy*maxT; ctx.lineTo(x,y); if(hit.type==='top'||hit.t>500)break; vx*=-1;
+    }
+    ctx.stroke(); ctx.restore();
+  }
+  function drawShooter(){ctx.fillStyle='rgba(0,0,0,.25)';ctx.beginPath();ctx.arc(shooter.x,shooter.y+8,54,0,Math.PI*2);ctx.fill();drawBubble(shooter.x,shooter.y,current,R+3);drawBubble(shooter.x+70,shooter.y+8,next,R*.75);ctx.fillStyle='#fff';ctx.font='14px Arial';ctx.textAlign='center';ctx.fillText('NEXT',shooter.x+70,shooter.y+44);ctx.textAlign='left';}
+  function drawUI(){ctx.fillStyle='rgba(0,0,0,.35)';roundRect(18,14,924,48,15,true,false);ctx.fillStyle='#fff';ctx.font='bold 20px Arial';ctx.fillText(endless?'Endless':'Random',38,45);ctx.fillText(endless?'Moves ∞':`Moves ${moves}`,165,45);ctx.fillText(`Score ${score}`,315,45);ctx.font='16px Microsoft YaHei, Arial';ctx.fillStyle='#dfe8ff';ctx.textAlign='right';ctx.fillText(message,925,45);ctx.textAlign='left';}
+  function drawPanel(){ctx.fillStyle='rgba(0,0,0,.62)';roundRect(W/2-230,H/2-92,460,184,22,true,false);ctx.textAlign='center';ctx.fillStyle=state==='win'?'#7bff9f':'#ff7382';ctx.font='bold 36px Arial';ctx.fillText(state==='win'?'YOU WIN':'GAME OVER',W/2,H/2-24);ctx.fillStyle='#fff';ctx.font='18px Microsoft YaHei, Arial';ctx.fillText(message,W/2,H/2+16);ctx.fillStyle='#ffe870';ctx.fillText('R 重开｜N 重新随机',W/2,H/2+52);ctx.textAlign='left';}
+  function drawParticles(){for(const p of particles){ctx.globalAlpha=Math.max(0,p.life);ctx.fillStyle=p.c;ctx.beginPath();ctx.arc(p.x,p.y,p.r,0,Math.PI*2);ctx.fill();ctx.globalAlpha=1;}}
+  function burst(x,y,c){for(let i=0;i<14;i++)particles.push({x,y,vx:(Math.random()-.5)*220,vy:(Math.random()-.8)*220,r:2+Math.random()*4,c,life:.4+Math.random()*.5});}
+  function shade(hex,amt){let num=parseInt(hex.slice(1),16),r=(num>>16)+amt,g=(num>>8&255)+amt,b=(num&255)+amt;return '#'+(0x1000000+(Math.max(0,Math.min(255,r))<<16)+(Math.max(0,Math.min(255,g))<<8)+Math.max(0,Math.min(255,b))).toString(16).slice(1);}
+  function roundRect(x,y,w,h,r,fill,stroke){ctx.beginPath();ctx.moveTo(x+r,y);ctx.arcTo(x+w,y,x+w,y+h,r);ctx.arcTo(x+w,y+h,x,y+h,r);ctx.arcTo(x,y+h,x,y,r);ctx.arcTo(x,y,x+w,y,r);if(fill)ctx.fill();if(stroke)ctx.stroke();}
+
+  canvas.addEventListener('mousemove',e=>{const rect=canvas.getBoundingClientRect();const mx=(e.clientX-rect.left)*W/rect.width,my=(e.clientY-rect.top)*H/rect.height;let a=Math.atan2(my-shooter.y,mx-shooter.x);aim=Math.max(-Math.PI+.12,Math.min(-.12,a));});
+  canvas.addEventListener('mousedown',shoot);
+  window.addEventListener('keydown',e=>{ if(e.key==='r'||e.key==='R')restartSame(); if(e.key==='n'||e.key==='N')randomBoard(); });
+  modeToggle.addEventListener('click',()=>{pendingEndless=!pendingEndless;modeToggle.classList.toggle('on',pendingEndless);modeText.textContent=pendingEndless?'无尽模式（待生效）':'随机关卡（待生效）';message='配置已切换，当前局不变；按 N 后重新生成并生效';});
+  function loop(now){const dt=Math.min(.033,(now-last)/1000);last=now;update(dt);draw();requestAnimationFrame(loop);} randomBoard(); requestAnimationFrame(loop);
+})();

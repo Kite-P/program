@@ -1,0 +1,302 @@
+(() => {
+  const canvas = document.getElementById('game');
+  const ctx = canvas.getContext('2d');
+  const W = canvas.width, H = canvas.height;
+  const bottomY = H - 24;
+  const screwR = 12, holeR = 17;
+  const colors = {
+    yellow:{fill:'#f6c94a',stroke:'#8d6412',layer:0},
+    blue:{fill:'#438ff0',stroke:'#15549e',layer:1},
+    red:{fill:'#f05e59',stroke:'#982b28',layer:2},
+    green:{fill:'#58c96d',stroke:'#1b7d37',layer:3}
+  };
+  const colorOrder = ['yellow','blue','red','green'];
+  let boards=[], holes=[], screws=[], selected=null, oldHole=null, mouse={x:0,y:0};
+  let state='play', timer=175, timerStarted=false, stableTimer=0, message='', particles=[];
+  let last=performance.now();
+
+  function resetGame(){
+    boards=[]; holes=[]; screws=[]; selected=null; oldHole=null; particles=[];
+    state='play'; timer=175; timerStarted=false; stableTimer=0;
+    message='点击螺丝，再点击完整露出的空孔。移动过程中木板保持静止。按 R 重新随机。';
+    buildLevel();
+    rebuildScrewsFromBoardHoles();
+    updateAttachments(); updateHoleValidity();
+  }
+
+  function makeWallHoles(){
+    const xs=[86,166,246,326,406,486,566,646,726,806,886];
+    const ys=[100,174,248,322,396,470];
+    const arr=[]; let id=0;
+    for(const y of ys) for(const x of xs) arr.push({id:id++,x,y,screw:null,used:0,valid:true,active:false});
+    return arr;
+  }
+  function holeAtGrid(x,y){return holes.find(h=>Math.abs(h.x-x)<3 && Math.abs(h.y-y)<3);}
+  function choose(arr){return arr[Math.floor(Math.random()*arr.length)];}
+
+  function buildLevel(){
+    holes = makeWallHoles();
+    const target = 28 + Math.floor(Math.random()*6);
+    let guard=0;
+    while(boards.length < target && guard++ < 4200){
+      const color = choose(colorOrder);
+      const b = makeBoard(color);
+      if(!b) continue;
+      // Same-color boards are on the same layer, so do not start overlapped.
+      if(boards.some(o=>o.color===b.color && roughOverlap(o,b,1.10))) continue;
+      boards.push(b);
+      for(const bh of b.holes){ holes[bh.holeId].used++; holes[bh.holeId].active=true; }
+    }
+    // Only 1-3 initially empty holes. They must be completely visible, not covered by boards.
+    const emptyCount = 1 + Math.floor(Math.random()*3);
+    const free = holes.filter(h=>!h.active && h.used===0 && h.y>90 && h.y<455 && h.x>55 && h.x<W-55 && !boards.some(b=>!b.removed && pointInsideSolid(b,h.x,h.y)));
+    shuffle(free);
+    for(const h of free.slice(0, emptyCount)) h.active=true;
+  }
+
+  function makeBoard(color){
+    // Mostly rectangles; a few circles and triangles. Holes are always placed inside the board, never on edges.
+    const r=Math.random();
+    const shape = r<0.08 ? 'circle' : r<0.14 ? 'tri' : r<0.34 ? 'wide' : 'long';
+    const b={id:boards.length,color,shape,x:0,y:0,angle:0,w:190,h:58,holes:[],attached:[],vx:0,vy:0,av:0,removed:false,alpha:1};
+    const center = choose(holes.filter(h=>h.x>100&&h.x<W-100&&h.y>110&&h.y<430));
+    b.x=center.x + (Math.random()-.5)*60;
+    b.y=center.y + (Math.random()-.5)*50;
+    b.angle= (Math.random()-.5) * 0.55;
+    if(shape==='long'){ b.w = 190 + Math.random()*120; b.h = 52 + Math.random()*10; if(Math.random()<.55) b.angle += choose([0, Math.PI/12, -Math.PI/12, Math.PI/8, -Math.PI/8]); }
+    else if(shape==='wide'){ b.w = 150 + Math.random()*110; b.h = 82 + Math.random()*24; b.angle += choose([0, Math.PI/14, -Math.PI/14]); }
+    else if(shape==='circle'){ b.w = b.h = 90 + Math.random()*46; b.angle = 0; }
+    else if(shape==='tri'){ b.w = 130 + Math.random()*55; b.h = 105 + Math.random()*35; b.angle += (Math.random()-.5)*0.35; }
+    const candidates = holes.filter(h=>h.y<500 && h.x>35 && h.x<W-35 && holeInsideBoardInterior(b,h.x,h.y));
+    if(candidates.length<2) return null;
+    // Prefer sharing wall screw positions with other-color boards to create layered overlaps.
+    candidates.sort((a,bh)=>(bh.used-a.used) + (Math.random()-.5)*.9);
+    const picked=[];
+    for(const h of candidates){
+      if(picked.some(p=>dist(p,h)<62)) continue;
+      if(h.used>0 && Math.random()<.75 || picked.length<2 || Math.random()<.35) picked.push(h);
+      if(picked.length >= (shape==='long'?3:2) + Math.floor(Math.random()*2)) break;
+    }
+    if(picked.length<2){ shuffle(candidates); for(const h of candidates){ if(!picked.some(p=>dist(p,h)<62)) picked.push(h); if(picked.length>=2) break; } }
+    if(picked.length<2) return null;
+    for(const h of picked){ const lp=worldToLocalRaw(b,h.x,h.y); b.holes.push({holeId:h.id,lx:lp.x,ly:lp.y}); }
+    // Final safety: every hole must be away from edges.
+    if(b.holes.some(bh=>!localHoleSafe(b,bh.lx,bh.ly))) return null;
+    return b;
+  }
+
+  function rebuildScrewsFromBoardHoles(){
+    let sid=0; screws=[];
+    for(const h of holes){
+      if(h.used>0){ h.active=true; h.screw=sid; screws.push({id:sid,x:h.x,y:h.y,holeId:h.id,held:false}); sid++; }
+      else h.screw=null;
+    }
+  }
+
+  function updateAttachments(){
+    for(const b of boards) b.attached=[];
+    for(const b of boards){ if(b.removed) continue;
+      for(const bh of b.holes){
+        const wallHole=holes[bh.holeId]; if(!wallHole || wallHole.screw==null) continue;
+        const s=screws[wallHole.screw]; if(!s || s.held) continue;
+        const p=localToWorld(b,bh.lx,bh.ly);
+        if(dist(p,s)<holeR*.78) b.attached.push({screw:s.id,holeId:wallHole.id,lx:bh.lx,ly:bh.ly,x:s.x,y:s.y});
+      }
+    }
+  }
+
+  function updateHoleValidity(){
+    for(const h of holes){
+      if(!h.active){ h.valid=false; continue; }
+      if(h.screw!=null){ h.valid=true; continue; }
+      h.valid=true;
+      for(const b of boards){ if(b.removed) continue;
+        if(pointInsideSolid(b,h.x,h.y)){ h.valid=false; break; }
+      }
+    }
+  }
+  function canPlaceIn(h){ return h && h.active && h.screw==null && h.valid; }
+  function hasLegalMove(){ return screws.some(s=>!s.held) && holes.some(canPlaceIn); }
+  function allStable(){ return boards.filter(b=>!b.removed).every(b=>Math.hypot(b.vx,b.vy)<.12 && Math.abs(b.av)<.035); }
+
+  function update(dt){
+    particles = particles.filter(p=>(p.life-=dt)>0).map(p=>{p.x+=p.vx*dt;p.y+=p.vy*dt;p.vy+=360*dt;return p;});
+    if(state!=='play') return;
+    if(timerStarted){ timer-=dt; if(timer<=0){timer=0;state='lose';message='时间结束，挑战失败';} }
+    if(selected==null){
+      const sub=3;
+      for(let step=0; step<sub; step++){
+        for(const b of boards) if(!b.removed) stepBoard(b,dt/sub);
+        solveSameColorCollisions();
+      }
+      updateAttachments();
+    }
+    for(const b of boards){
+      if(!b.removed && b.attached.length===0 && b.y - boardRadius(b) > bottomY+8){
+        b.removed=true; b.alpha=0; burst(b.x,bottomY-28,colors[b.color].fill); message='木板完全落出区域并消失！';
+      }
+    }
+    updateHoleValidity();
+    if(boards.every(b=>b.removed)){state='win';message='全部木板清除，通关！';}
+    if(allStable()) stableTimer+=dt; else stableTimer=0;
+    if(state==='play' && timerStarted && selected==null && stableTimer>1.1 && !hasLegalMove()){state='lose';message='所有木板已静止，且没有可用孔位。';}
+  }
+
+  function stepBoard(b,dt){
+    if(b.attached.length>=2){ b.vx=b.vy=b.av=0; return; }
+    if(b.attached.length===1){
+      const a=b.attached[0], pivot={x:a.x,y:a.y};
+      // Realistic pendulum-like torque caused by gravity on the center of mass.
+      const dx=b.x-pivot.x;
+      b.av += dx*0.0022*dt*60;
+      b.av *= 0.993;
+      b.angle += b.av*dt;
+      const rp=rotate(a.lx,a.ly,b.angle);
+      b.x=pivot.x-rp.x; b.y=pivot.y-rp.y;
+      collideBoardWithScrews(b,dt,true);
+      return;
+    }
+    b.vy += 680*dt;
+    b.x += b.vx*dt; b.y += b.vy*dt; b.angle += b.av*dt;
+    b.vx*=.998; b.vy*=.999; b.av*=.998;
+    collideBoardWithScrews(b,dt,false);
+  }
+
+  function collideBoardWithScrews(b,dt,pivoted){
+    for(const s of screws){ if(s.held) continue;
+      const ownHole = b.holes.some(bh=>dist(localToWorld(b,bh.lx,bh.ly),s)<holeR*.72);
+      if(ownHole) continue;
+      if(boardOverlapsScrew(b,s)){
+        let nx=b.x-s.x, ny=b.y-s.y; let len=Math.hypot(nx,ny);
+        if(len<.1){ nx=Math.cos(b.angle); ny=Math.sin(b.angle); len=1; }
+        nx/=len; ny/=len;
+        if(pivoted){
+          const r={x:s.x-b.x,y:s.y-b.y};
+          const cross=r.x*ny-r.y*nx;
+          b.av += cross*0.00085;
+          b.angle += b.av*dt;
+        }else{
+          b.x += nx*16.0; b.y += ny*16.0;
+          const vn=b.vx*nx+b.vy*ny;
+          if(vn<0){ b.vx -= 1.7*vn*nx; b.vy -= 1.7*vn*ny; }
+          b.av += (nx*(s.y-b.y)-ny*(s.x-b.x))*0.0004;
+        }
+      }
+    }
+  }
+
+  function solveSameColorCollisions(){
+    for(let iter=0;iter<10;iter++){
+      for(let i=0;i<boards.length;i++) for(let j=i+1;j<boards.length;j++){
+        const a=boards[i], b=boards[j];
+        if(a.removed||b.removed||a.color!==b.color) continue;
+        const min=(boardRadius(a)+boardRadius(b))*0.98;
+        const d=dist(a,b);
+        if(d<min && d>.1){
+          const nx=(a.x-b.x)/d, ny=(a.y-b.y)/d, push=(min-d)*0.42;
+          if(a.attached.length<2){ a.x+=nx*push; a.y+=ny*push; a.vx+=nx*35; a.vy+=ny*35; }
+          if(b.attached.length<2){ b.x-=nx*push; b.y-=ny*push; b.vx-=nx*35; b.vy-=ny*35; }
+        }
+      }
+    }
+  }
+
+  function draw(){ drawBg(); drawHoles(); drawBoards(); drawScrews(); drawParticles(); drawUI(); if(state==='win'||state==='lose') drawPanel(); }
+  function drawBg(){
+    const g=ctx.createLinearGradient(0,0,0,H);g.addColorStop(0,'#c89d62');g.addColorStop(1,'#8a5d2f');ctx.fillStyle=g;ctx.fillRect(0,0,W,H);
+    ctx.strokeStyle='rgba(87,47,16,.28)';ctx.lineWidth=3;for(let y=72;y<H;y+=92){ctx.beginPath();ctx.moveTo(0,y);ctx.lineTo(W,y);ctx.stroke();}
+    ctx.fillStyle='rgba(0,0,0,.12)';ctx.fillRect(0,H-24,W,24);
+  }
+  function drawHoles(){
+    for(const h of holes){ if(!h.active) continue; ctx.save();ctx.globalAlpha=h.valid?1:.28;ctx.fillStyle='#4a2a16';ctx.strokeStyle=h.valid?'#f3d7a2':'#8f2f2f';ctx.lineWidth=4;ctx.beginPath();ctx.arc(h.x,h.y,holeR,0,Math.PI*2);ctx.fill();ctx.stroke();ctx.restore();}
+  }
+  function drawBoards(){ const sorted=[...boards].filter(b=>!b.removed).sort((a,b)=>colors[a.color].layer-colors[b.color].layer); for(const b of sorted) drawBoard(b); }
+  function drawBoard(b){
+    ctx.save(); ctx.translate(b.x,b.y); ctx.rotate(b.angle); ctx.globalAlpha=b.alpha;
+    const ci=colors[b.color]; ctx.fillStyle=ci.fill; ctx.strokeStyle=ci.stroke; ctx.lineWidth=5;
+    ctx.shadowColor='rgba(0,0,0,.25)'; ctx.shadowBlur=9; ctx.shadowOffsetY=5;
+    if(b.shape==='circle'){ ctx.beginPath(); ctx.arc(0,0,b.w/2,0,Math.PI*2); ctx.fill(); ctx.stroke(); }
+    else if(b.shape==='tri'){ ctx.beginPath(); ctx.moveTo(0,-b.h/2); ctx.lineTo(b.w/2,b.h/2); ctx.lineTo(-b.w/2,b.h/2); ctx.closePath(); ctx.fill(); ctx.stroke(); }
+    else { roundRect(-b.w/2,-b.h/2,b.w,b.h,18,true,true); }
+    ctx.shadowColor='transparent'; ctx.fillStyle='rgba(255,255,255,.16)'; ctx.fillRect(-b.w*.42,-5,b.w*.84,10);
+    ctx.strokeStyle='rgba(255,255,255,.18)'; ctx.lineWidth=2; for(let x=-b.w/2+35;x<b.w/2-30;x+=55){ctx.beginPath();ctx.moveTo(x,-b.h*.34);ctx.lineTo(x,b.h*.34);ctx.stroke();}
+    for(const bh of b.holes){ ctx.fillStyle='rgba(65,32,14,.78)'; ctx.strokeStyle='rgba(255,232,184,.58)'; ctx.lineWidth=3; ctx.beginPath(); ctx.arc(bh.lx,bh.ly,holeR*.86,0,Math.PI*2); ctx.fill(); ctx.stroke(); }
+    ctx.restore(); ctx.globalAlpha=1;
+  }
+  function drawScrews(){
+    for(const s of screws){ const x=s.held?mouse.x:s.x,y=s.held?mouse.y:s.y; ctx.save(); ctx.fillStyle='#c9d2dc'; ctx.strokeStyle='#4e5964'; ctx.lineWidth=3; ctx.beginPath(); ctx.arc(x,y,screwR,0,Math.PI*2); ctx.fill(); ctx.stroke(); ctx.strokeStyle='#3c4650'; ctx.lineWidth=4; ctx.beginPath(); ctx.moveTo(x-screwR*.55,y);ctx.lineTo(x+screwR*.55,y);ctx.moveTo(x,y-screwR*.55);ctx.lineTo(x,y+screwR*.55);ctx.stroke(); ctx.restore(); }
+  }
+  function drawUI(){
+    ctx.fillStyle='rgba(255,255,255,.82)';roundRect(18,12,924,45,14,true,false);ctx.fillStyle='#39230f';ctx.font='bold 19px Microsoft YaHei, Arial';ctx.fillText('Wood Screw Bolts Puzzle',36,42);
+    const t=timerText();ctx.textAlign='right';ctx.fillStyle=timer<=10&&timerStarted?'#c62024':'#39230f';ctx.font=`bold ${timer<=10&&timerStarted?Math.round(22+(10-timer)*1.5):20}px Arial`;ctx.fillText(t,910,42);ctx.textAlign='left';
+    ctx.fillStyle='rgba(255,255,255,.74)';roundRect(22,H-56,916,34,12,true,false);ctx.fillStyle='#4b331e';ctx.font='15px Microsoft YaHei, Arial';ctx.fillText(message,42,H-34);
+  }
+  function timerText(){ if(!timerStarted)return '未开始'; if(timer>10){const m=Math.floor(timer/60),s=Math.floor(timer%60);return `${m}:${String(s).padStart(2,'0')}`;} return `${timer.toFixed(2)}s`; }
+  function drawPanel(){ctx.fillStyle='rgba(0,0,0,.58)';roundRect(W/2-250,H/2-92,500,184,24,true,false);ctx.textAlign='center';ctx.fillStyle=state==='win'?'#74ff9c':'#ff7272';ctx.font='bold 34px Arial';ctx.fillText(state==='win'?'YOU WIN':'GAME OVER',W/2,H/2-24);ctx.fillStyle='#fff';ctx.font='18px Microsoft YaHei,Arial';ctx.fillText(message,W/2,H/2+18);ctx.fillStyle='#ffe875';ctx.fillText('按 R 重新随机',W/2,H/2+55);ctx.textAlign='left';}
+  function drawParticles(){for(const p of particles){ctx.globalAlpha=Math.max(0,p.life);ctx.fillStyle=p.c;ctx.beginPath();ctx.arc(p.x,p.y,p.r,0,Math.PI*2);ctx.fill();ctx.globalAlpha=1;}}
+
+  function onClick(x,y){
+    if(state!=='play'){resetGame();return;}
+    if(selected!=null){
+      const h=holes.find(h=>dist(h,{x,y})<holeR+6);
+      if(h && (canPlaceIn(h) || h.id===oldHole)){
+        const s=screws[selected]; const returning=h.id===oldHole;
+        if(oldHole!=null) holes[oldHole].screw=null;
+        h.screw=s.id; s.holeId=h.id; s.x=h.x; s.y=h.y; s.held=false;
+        selected=null; oldHole=null; updateAttachments(); updateHoleValidity(); stableTimer=0;
+        message=returning?'螺丝已放回原孔，取消本次移动。':'螺丝已移动，木板开始运动。';
+      }else message='这个孔被木板遮挡或已有螺丝，不能放入。';
+      return;
+    }
+    const s=screws.find(s=>!s.held && dist(s,{x,y})<screwR+7);
+    if(s){ if(!timerStarted) timerStarted=true; selected=s.id; oldHole=s.holeId; s.held=true; message='请选择一个完整露出的空孔；也可以点原孔取消。'; }
+  }
+
+  function localToWorld(b,lx,ly){ const r=rotate(lx,ly,b.angle); return {x:b.x+r.x,y:b.y+r.y}; }
+  function worldToLocalRaw(b,x,y){ return rotate(x-b.x,y-b.y,-b.angle); }
+  function rotate(x,y,a){ const c=Math.cos(a),s=Math.sin(a); return {x:x*c-y*s,y:x*s+y*c}; }
+  function localHoleSafe(b,lx,ly){
+    const margin = holeR + 13;
+    if(b.shape==='circle') return Math.hypot(lx,ly) < b.w/2 - margin;
+    if(b.shape==='tri'){
+      if(!pointInTri({x:lx,y:ly},{x:0,y:-b.h/2+margin},{x:b.w/2-margin,y:b.h/2-margin},{x:-b.w/2+margin,y:b.h/2-margin})) return false;
+      return true;
+    }
+    return Math.abs(lx) < b.w/2 - margin && Math.abs(ly) < b.h/2 - margin;
+  }
+  function holeInsideBoardInterior(b,x,y){ const p=worldToLocalRaw(b,x,y); return localHoleSafe(b,p.x,p.y); }
+
+  function pointInsideSolid(b,x,y){
+    const p=worldToLocalRaw(b,x,y); let inside=false;
+    if(b.shape==='circle') inside=Math.hypot(p.x,p.y)<b.w/2+screwR*.25;
+    else if(b.shape==='tri') inside=pointInTri(p,{x:0,y:-b.h/2},{x:b.w/2,y:b.h/2},{x:-b.w/2,y:b.h/2});
+    else inside=Math.abs(p.x)<b.w/2+screwR*.25 && Math.abs(p.y)<b.h/2+screwR*.25;
+    if(!inside) return false;
+    for(const bh of b.holes) if(Math.hypot(p.x-bh.lx,p.y-bh.ly)<holeR*.92) return false;
+    return true;
+  }
+  function boardOverlapsScrew(b,s){
+    const p=worldToLocalRaw(b,s.x,s.y); let hit=false;
+    if(b.shape==='circle') hit=Math.hypot(p.x,p.y)<b.w/2+screwR;
+    else if(b.shape==='tri') hit=pointInTri(p,{x:0,y:-b.h/2-screwR},{x:b.w/2+screwR,y:b.h/2+screwR},{x:-b.w/2-screwR,y:b.h/2+screwR});
+    else hit=Math.abs(p.x)<b.w/2+screwR && Math.abs(p.y)<b.h/2+screwR;
+    if(!hit) return false;
+    for(const bh of b.holes) if(Math.hypot(p.x-bh.lx,p.y-bh.ly)<holeR*.88) return false;
+    return true;
+  }
+  function pointInTri(p,a,b,c){
+    const area=(p1,p2,p3)=>Math.abs((p1.x*(p2.y-p3.y)+p2.x*(p3.y-p1.y)+p3.x*(p1.y-p2.y))/2);
+    const A=area(a,b,c), A1=area(p,b,c), A2=area(a,p,c), A3=area(a,b,p);
+    return Math.abs(A-(A1+A2+A3))<.8;
+  }
+  function roughOverlap(a,b,scale){ return dist(a,b)<(boardRadius(a)+boardRadius(b))*scale; }
+  function boardRadius(b){ return Math.max(b.w,b.h)*.56; }
+  function dist(a,b){return Math.hypot(a.x-b.x,a.y-b.y);} function shuffle(a){for(let i=a.length-1;i>0;i--){const j=Math.floor(Math.random()*(i+1));[a[i],a[j]]=[a[j],a[i]];}return a;}
+  function burst(x,y,c){for(let i=0;i<28;i++)particles.push({x,y,vx:-190+Math.random()*380,vy:-280+Math.random()*240,r:2+Math.random()*3,c,life:.55+Math.random()*.6});}
+  function roundRect(x,y,w,h,r,fill,stroke){ctx.beginPath();ctx.moveTo(x+r,y);ctx.arcTo(x+w,y,x+w,y+h,r);ctx.arcTo(x+w,y+h,x,y+h,r);ctx.arcTo(x,y+h,x,y,r);ctx.arcTo(x,y,x+w,y,r);if(fill)ctx.fill();if(stroke)ctx.stroke();}
+
+  canvas.addEventListener('mousemove',e=>{const rect=canvas.getBoundingClientRect();mouse.x=(e.clientX-rect.left)*W/rect.width;mouse.y=(e.clientY-rect.top)*H/rect.height;});
+  canvas.addEventListener('mousedown',e=>{const rect=canvas.getBoundingClientRect();onClick((e.clientX-rect.left)*W/rect.width,(e.clientY-rect.top)*H/rect.height);});
+  window.addEventListener('keydown',e=>{if(e.key==='r'||e.key==='R')resetGame(); if(e.key==='Escape'&&selected!=null){screws[selected].held=false; selected=null; oldHole=null; message='已取消选择。';}});
+  function loop(now){const dt=Math.min(.033,(now-last)/1000);last=now;update(dt);draw();requestAnimationFrame(loop);} resetGame(); requestAnimationFrame(loop);
+})();
